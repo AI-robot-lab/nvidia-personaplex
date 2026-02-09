@@ -55,7 +55,23 @@ logger = setup_logger(__name__)
 DeviceString = Literal["cuda"] | Literal["cpu"] #| Literal["mps"]
 
 def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
-    """Return a torch.device based on the requested string or availability."""
+    """
+    Automatyczny wybór urządzenia obliczeniowego (GPU/CPU).
+    
+    Funkcja ta decyduje gdzie będą wykonywane obliczenia modelu:
+    - Najpierw sprawdza czy użytkownik wymaga konkretnego urządzenia (requested)
+    - Jeśli nie, preferuje GPU CUDA (znacznie szybsze dla modeli AI)
+    - W ostateczności wybiera CPU (wolniejsze, ale zawsze dostępne)
+    
+    Dla robota: Jeśli robot ma GPU NVIDIA - użyje go automatycznie.
+    Jeśli nie ma - użyje CPU (może być za wolne dla real-time).
+    
+    Args:
+        requested: Opcjonalne wymuszenie urządzenia ("cuda" lub "cpu")
+    
+    Returns:
+        torch.device: Obiekt reprezentujący wybrane urządzenie
+    """
     if requested is not None:
         return torch.device(requested)
     if torch.cuda.is_available():
@@ -66,44 +82,138 @@ def torch_auto_device(requested: Optional[DeviceString] = None) -> torch.device:
 
 
 def seed_all(seed):
+    """
+    Ustawia ziarno (seed) dla wszystkich generatorów liczb losowych.
+    
+    Dlaczego to jest ważne?
+    - Modele AI używają losowości podczas generowania odpowiedzi
+    - To samo ziarno = te same wyniki (reprodukowalność eksperymentów)
+    - Przydatne do testowania i debugowania
+    
+    Funkcja ustawia seed dla:
+    1. torch (biblioteka PyTorch)
+    2. torch.cuda (obliczenia na GPU)
+    3. random (standardowa biblioteka Python)
+    4. numpy (biblioteka do obliczeń numerycznych)
+    
+    Args:
+        seed: Liczba całkowita jako ziarno (np. 42424242)
+    """
+    # Ustaw seed dla PyTorch (CPU)
     torch.manual_seed(seed)
+    
+    # Ustaw seed dla PyTorch (GPU) - tylko jeśli GPU jest dostępne
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  # for multi-GPU setups
+        torch.cuda.manual_seed_all(seed)  # dla konfiguracji z wieloma GPU
+    
+    # Ustaw seed dla standardowego generatora Python
     random.seed(seed)
+    
+    # Ustaw seed dla NumPy
     np.random.seed(seed)
+    
+    # Wyłącz deterministyczne zachowanie cuDNN (dla lepszej wydajności)
+    # W trybie produkcyjnym można to włączyć dla pełnej reprodukowalności
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = False
 
 
 def wrap_with_system_tags(text: str) -> str:
-    """Add system tags as the model expects if they are missing.
-    Example: "<system> You enjoy having a good conversation. Have a deep conversation about technology. Your name is Jane. <system>"
+    """
+    Opakowuje tekst promptu w znaczniki systemowe wymagane przez model.
+    
+    Model PersonaPlex oczekuje promptów w specjalnym formacie:
+    "<system> treść promptu <system>"
+    
+    Znaczniki <system> informują model, że to jest instrukcja systemowa,
+    a nie część rozmowy użytkownika.
+    
+    Przykład:
+        Input:  "You are a friendly robot assistant."
+        Output: "<system> You are a friendly robot assistant. <system>"
+    
+    Jeśli tekst już ma znaczniki - nie dodaje ich ponownie.
+    
+    Args:
+        text: Tekst promptu do opakowania
+    
+    Returns:
+        str: Tekst z dodanymi znacznikami systemowymi
     """
     cleaned = text.strip()
+    
+    # Sprawdź czy prompt już ma znaczniki - jeśli tak, zwróć bez zmian
     if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
         return cleaned
+    
+    # Dodaj znaczniki systemowe
     return f"<system> {cleaned} <system>"
 
 
 @dataclass
 class ServerState:
-    mimi: MimiModel
-    other_mimi: MimiModel
-    text_tokenizer: sentencepiece.SentencePieceProcessor
-    lm_gen: LMGen
-    lock: asyncio.Lock
+    """
+    Stan serwera PersonaPlex - przechowuje wszystkie komponenty potrzebne do działania.
+    
+    Ta klasa zarządza:
+    - Modelami audio (Mimi - kompresja/dekompresja)
+    - Modelem językowym (LM - generowanie odpowiedzi)
+    - Tokenizerem tekstu (konwersja słowa ↔ liczby)
+    - Blokadą (lock) dla bezpiecznej obsługi wielu klientów
+    
+    Dlaczego dwa modele Mimi (mimi i other_mimi)?
+    - Jeden enkoduje audio użytkownika (wejście)
+    - Drugi dekoduje audio robota/asystenta (wyjście)
+    - Oba działają jednocześnie (full-duplex)
+    
+    Zastosowanie w robotyce:
+    - Jeden ServerState obsługuje jednego klienta (np. jednego robota)
+    - Lock zapewnia że w danym momencie tylko jedna rozmowa jest aktywna
+    """
+    mimi: MimiModel                                    # Model kompresji audio - dla wejścia
+    other_mimi: MimiModel                              # Model kompresji audio - dla wyjścia
+    text_tokenizer: sentencepiece.SentencePieceProcessor  # Tokenizer tekstu
+    lm_gen: LMGen                                      # Generator modelu językowego
+    lock: asyncio.Lock                                 # Blokada dla synchronizacji
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False):
+        """
+        Inicjalizacja stanu serwera - konfiguracja wszystkich komponentów.
+        
+        Krok po kroku co się dzieje:
+        1. Zapisuje referencje do modeli (Mimi, LM, tokenizer)
+        2. Oblicza frame_size - rozmiar pojedynczego fragmentu audio
+        3. Tworzy LMGen - generator wysokiego poziomu zarządzający modelem
+        4. Włącza tryb streaming dla wszystkich modeli (dla real-time)
+        
+        Args:
+            mimi: Model Mimi do enkodowania audio wejściowego
+            other_mimi: Model Mimi do dekodowania audio wyjściowego  
+            text_tokenizer: Tokenizer do konwersji tekst ↔ tokeny
+            lm: Model językowy (LM) - serce systemu
+            device: Urządzenie obliczeniowe (GPU/CPU)
+            voice_prompt_dir: Katalog z plikami głosów (embeddings)
+            save_voice_prompt_embeddings: Czy zapisywać embeddings głosów
+        """
+        # Zapisz komponenty jako atrybuty klasy
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
+        
+        # Oblicz rozmiar ramki audio w próbkach
+        # sample_rate = ile próbek na sekundę (np. 24000 Hz)
+        # frame_rate = ile ramek na sekundę (np. 12.5 Hz)
+        # frame_size = sample_rate / frame_rate = ile próbek w jednej ramce
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+        
+        # Utwórz generator modelu - zarządza generowaniem odpowiedzi
         self.lm_gen = LMGen(lm,
+                            # Ile ramek ciszy po promptach (0.5s * frame_rate)
                             audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
                             sample_rate=self.mimi.sample_rate,
                             device=device,
@@ -111,76 +221,173 @@ class ServerState:
                             save_voice_prompt_embeddings=save_voice_prompt_embeddings,
         )
         
+        # Utwórz blokadę asyncio - zapewnia że tylko jedna rozmowa na raz
         self.lock = asyncio.Lock()
+        
+        # Włącz tryb streaming dla wszystkich modeli
+        # Tryb streaming = przetwarzanie w małych fragmentach (real-time)
+        # Argument 1 = batch size (ile próbek jednocześnie)
         self.mimi.streaming_forever(1)
         self.other_mimi.streaming_forever(1)
         self.lm_gen.streaming_forever(1)
     
     def warmup(self):
+        """
+        Rozgrzewka modelu - przygotowanie do pracy w czasie rzeczywistym.
+        
+        Dlaczego to jest potrzebne?
+        - Pierwsze uruchomienie GPU jest zawsze wolniejsze (inicjalizacja)
+        - CUDA graphs i inne optymalizacje wymagają "rozgrzania"
+        - Po warmup'ie model działa znacznie szybciej i bardziej przewidywalnie
+        
+        Co się dzieje w tej funkcji:
+        1. Tworzy sztucznie puste dane audio (zera)
+        2. Przepuszcza je przez cały pipeline modelu
+        3. Powtarza 4 razy aby wszystko było zainicjalizowane
+        4. Synchronizuje GPU (czeka na zakończenie obliczeń)
+        
+        Dla robota: Wywołaj tę funkcję raz po starcie, zanim zaczniesz
+        prawdziwe rozmowy. Dzięki temu pierwsze odpowiedzi nie będą wolniejsze.
+        """
+        # Powtórz proces 4 razy dla pełnej inicjalizacji
         for _ in range(4):
+            # Utwórz fragment audio wypełniony zerami (cisza)
+            # Kształt: [batch=1, channels=1, samples=frame_size]
             chunk = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=self.device)
+            
+            # KROK 1: Enkoduj audio do codes (kompresja)
             codes = self.mimi.encode(chunk)
+            
+            # Enkoduj również przez drugi Mimi (dla symetrii)
             _ = self.other_mimi.encode(chunk)
+            
+            # KROK 2: Przepuść każdą ramkę przez generator LM
             for c in range(codes.shape[-1]):
+                # Wygeneruj tokeny dla jednej ramki
                 tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                
+                # Jeśli generator jeszcze nie jest gotowy - pomiń
                 if tokens is None:
                     continue
+                
+                # KROK 3: Dekoduj wygenerowane tokeny audio do PCM
+                # tokens[:, 1:9] = kanały audio (8 codebooków)
                 _ = self.mimi.decode(tokens[:, 1:9])
                 _ = self.other_mimi.decode(tokens[:, 1:9])
-
+        
+        # Poczekaj aż GPU zakończy wszystkie operacje
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
 
 
     async def handle_chat(self, request):
+        """
+        Główna funkcja obsługująca połączenie WebSocket z klientem.
+        
+        To jest serce serwera - zarządza całą sesją rozmowy:
+        1. Nawiązuje połączenie WebSocket
+        2. Ładuje konfigurację (głos, prompt tekstowy)
+        3. Przetwarza prompty systemowe (voice + text)
+        4. Uruchamia pętle komunikacji:
+           - recv_loop: Odbiera audio od użytkownika
+           - opus_loop: Przetwarza audio i generuje odpowiedzi
+           - send_loop: Wysyła wygenerowane audio do użytkownika
+        
+        Dla robota: To jest główna funkcja którą wywołujesz gdy robot
+        chce rozpocząć rozmowę. Działa asynchronicznie (async/await).
+        
+        Args:
+            request: Obiekt żądania HTTP zawierający parametry połączenia
+        
+        Returns:
+            WebSocketResponse: Obiekt połączenia WebSocket
+        """
+        # KROK 1: Inicjalizacja WebSocket
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        
+        # Utwórz kolorowy logger dla tej sesji (łatwiej debugować)
         clog = ColorizedLog.randomize()
-        peer = request.remote  # IP
-        peer_port = request.transport.get_extra_info("peername")[1]  # Port
+        
+        # Pobierz informacje o kliencie (dla logowania)
+        peer = request.remote  # Adres IP klienta
+        peer_port = request.transport.get_extra_info("peername")[1]  # Port klienta
         clog.log("info", f"Incoming connection from {peer}:{peer_port}")
 
+        # OPCJONALNE: Parametry sampling (zakomentowane - używamy domyślnych)
+        # Możesz je odkomentować i dostosować dla różnych zachowań modelu
         # self.lm_gen.temp = float(request.query["audio_temperature"])
         # self.lm_gen.temp_text = float(request.query["text_temperature"])
         # self.lm_gen.top_k_text = max(1, int(request.query["text_topk"]))
         # self.lm_gen.top_k = max(1, int(request.query["audio_topk"]))
         
-        # Construct full voice prompt path
+        # KROK 2: Konstruuj pełną ścieżkę do pliku voice prompt
         requested_voice_prompt_path = None
         voice_prompt_path = None
+        
         if self.voice_prompt_dir is not None:
+            # Pobierz nazwę pliku głosu z parametrów zapytania (np. "NATM1.pt")
             voice_prompt_filename = request.query["voice_prompt"]
             requested_voice_prompt_path = None
+            
             if voice_prompt_filename is not None:
+                # Połącz katalog z nazwą pliku
                 requested_voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_filename)
-            # If the voice prompt file does not exist, find a valid (s0) voiceprompt file in the directory
+            
+            # Sprawdź czy plik istnieje - jeśli nie, zgłoś błąd
             if requested_voice_prompt_path is None or not os.path.exists(requested_voice_prompt_path):
                 raise FileNotFoundError(
                     f"Requested voice prompt '{voice_prompt_filename}' not found in '{self.voice_prompt_dir}'"
                 )
             else:
                 voice_prompt_path = requested_voice_prompt_path
-                
+        
+        # KROK 3: Załaduj voice prompt jeśli się zmienił
         if self.lm_gen.voice_prompt != voice_prompt_path:
             if voice_prompt_path.endswith('.pt'):
-                # Load pre-saved voice prompt embeddings
+                # Załaduj pre-zapisane embeddingi głosu (szybsze)
                 self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
             else:
+                # Załaduj i przetwórz plik audio głosu (wolniejsze)
                 self.lm_gen.load_voice_prompt(voice_prompt_path)
+        
+        # KROK 4: Przygotuj text prompt (instrukcje dla modelu)
+        # Tokenizacja: zamiana tekstu na sekwencję liczb (tokenów)
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(request.query["text_prompt"])) if len(request.query["text_prompt"]) > 0 else None
+        
+        # KROK 5: Pobierz seed dla reprodukowalności (opcjonalnie)
         seed = int(request["seed"]) if "seed" in request.query else None
 
         async def recv_loop():
+            """
+            Pętla odbierania wiadomości WebSocket od klienta.
+            
+            Ta funkcja asynchroniczna:
+            - Nasłuchuje na wiadomości przychodzące przez WebSocket
+            - Rozpoznaje typ wiadomości (audio, zamknięcie, błąd)
+            - Przekazuje audio do opus_reader do dekodowania
+            - Ustawia flagę 'close' gdy połączenie się kończy
+            
+            Dla robota: Ta pętla odbiera strumień audio z mikrofonu robota/użytkownika.
+            """
             nonlocal close
             try:
+                # Iteruj przez wszystkie przychodzące wiadomości
                 async for message in ws:
+                    # Obsługa błędów połączenia
                     if message.type == aiohttp.WSMsgType.ERROR:
                         clog.log("error", f"{ws.exception()}")
                         break
+                    
+                    # Połączenie zamknięte przez drugą stronę
                     elif message.type == aiohttp.WSMsgType.CLOSED:
                         break
+                    
+                    # Żądanie zamknięcia połączenia
                     elif message.type == aiohttp.WSMsgType.CLOSE:
                         break
+                    
+                    # Sprawdź czy to wiadomość binarna (audio)
                     elif message.type != aiohttp.WSMsgType.BINARY:
                         clog.log("error", f"unexpected message type {message.type}")
                         continue
