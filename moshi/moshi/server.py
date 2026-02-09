@@ -391,118 +391,236 @@ class ServerState:
                     elif message.type != aiohttp.WSMsgType.BINARY:
                         clog.log("error", f"unexpected message type {message.type}")
                         continue
+                    
+                    # Pobierz dane wiadomości
                     message = message.data
+                    
+                    # Sprawdź czy to bytes (dane binarne)
                     if not isinstance(message, bytes):
                         clog.log("error", f"unsupported message type {type(message)}")
                         continue
+                    
+                    # Pomiń puste wiadomości
                     if len(message) == 0:
                         clog.log("warning", "empty message")
                         continue
+                    
+                    # PROTOKÓŁ: Pierwszy bajt określa typ wiadomości
                     kind = message[0]
-                    if kind == 1:  # audio
+                    
+                    if kind == 1:  # Typ 1 = audio data
+                        # Reszta wiadomości to skompresowane audio (Opus)
                         payload = message[1:]
+                        # Dodaj do bufora opus_reader do dekodowania
                         opus_reader.append_bytes(payload)
                     else:
                         clog.log("warning", f"unknown message kind {kind}")
             finally:
+                # Zawsze ustaw flagę zamknięcia gdy pętla się kończy
                 close = True
                 clog.log("info", "connection closed")
 
         async def opus_loop():
+            """
+            Główna pętla przetwarzania audio - serce systemu real-time.
+            
+            Ta funkcja:
+            1. Odbiera zdekodowane PCM audio z opus_reader
+            2. Akumuluje je w buforze do pełnej ramki (frame)
+            3. Enkoduje ramkę do codes przez Mimi
+            4. Przepuszcza przez model LM (generuje odpowiedź)
+            5. Dekoduje odpowiedź do PCM
+            6. Wysyła przez opus_writer do klienta
+            7. Dekoduje i wysyła tokeny tekstowe
+            
+            To jest główna pętla full-duplex - działa równolegle z recv_loop i send_loop.
+            
+            Dla robota: To tutaj dzieje się "magia" - audio wejściowe zamienia się
+            w odpowiedź audio i tekst w czasie rzeczywistym.
+            """
+            # Bufor akumulujący PCM audio do pełnej ramki
             all_pcm_data = None
 
             while True:
+                # Sprawdź czy połączenie zamknięte - jeśli tak, zakończ
                 if close:
                     return
+                
+                # Krótkie oczekiwanie aby nie zajmować 100% CPU
                 await asyncio.sleep(0.001)
+                
+                # Odczytaj zdekodowane PCM z opus_reader
                 pcm = opus_reader.read_pcm()
+                
+                # Jeśli brak danych - kontynuuj czekanie
                 if pcm.shape[-1] == 0:
                     continue
+                
+                # KROK 1: Akumuluj PCM w buforze
                 if all_pcm_data is None:
                     all_pcm_data = pcm
                 else:
+                    # Dołącz nowe dane do istniejącego bufora
                     all_pcm_data = np.concatenate((all_pcm_data, pcm))
+                
+                # KROK 2: Przetwarzaj pełne ramki
+                # Dopóki mamy wystarczająco danych dla pełnej ramki
                 while all_pcm_data.shape[-1] >= self.frame_size:
-                    be = time.time()
+                    be = time.time()  # Timestamp początkowy (dla debugowania)
+                    
+                    # Wytnij jedną ramkę z bufora
                     chunk = all_pcm_data[: self.frame_size]
                     all_pcm_data = all_pcm_data[self.frame_size:]
+                    
+                    # Konwersja numpy → torch tensor i przeniesienie na GPU/CPU
                     chunk = torch.from_numpy(chunk)
-                    chunk = chunk.to(device=self.device)[None, None]
+                    chunk = chunk.to(device=self.device)[None, None]  # Dodaj wymiary batch i channel
+                    
+                    # KROK 3: Enkoduj audio użytkownika do codes (kompresja)
                     codes = self.mimi.encode(chunk)
-                    _ = self.other_mimi.encode(chunk)
+                    _ = self.other_mimi.encode(chunk)  # Enkoduj też przez drugi Mimi (synchronizacja)
+                    
+                    # KROK 4: Przepuść przez model LM krok po kroku
                     for c in range(codes.shape[-1]):
+                        # Wygeneruj tokeny odpowiedzi (tekst + audio) dla jednej ramki codes
                         tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                        
+                        # Jeśli model jeszcze nie jest gotowy - pomiń
                         if tokens is None:
                             continue
+                        
+                        # Sprawdź kształt: powinno być dep_q+1 kanałów (tekst + 8 audio)
                         assert tokens.shape[1] == self.lm_gen.lm_model.dep_q + 1
+                        
+                        # KROK 5: Dekoduj tokeny audio do PCM
+                        # tokens[:, 1:9] = 8 codebook'ów audio (pomijamy kanał tekstowy [0])
                         main_pcm = self.mimi.decode(tokens[:, 1:9])
-                        _ = self.other_mimi.decode(tokens[:, 1:9])
+                        _ = self.other_mimi.decode(tokens[:, 1:9])  # Dekoduj też przez drugi Mimi
+                        
+                        # Przenieś PCM z GPU na CPU (dla dalszego przetwarzania)
                         main_pcm = main_pcm.cpu()
+                        
+                        # KROK 6: Wyślij wygenerowane PCM do opus_writer (do kompresji)
                         opus_writer.append_pcm(main_pcm[0, 0].numpy())
-                        text_token = tokens[0, 0, 0].item()
+                        
+                        # KROK 7: Przetwórz token tekstowy
+                        text_token = tokens[0, 0, 0].item()  # Pierwszy kanał = tekst
+                        
+                        # Jeśli to nie jest token specjalny (padding, etc.)
                         if text_token not in (0, 3):
+                            # Dekoduj token → słowo/fragment słowa
                             _text = self.text_tokenizer.id_to_piece(text_token)  # type: ignore
+                            # Zamień znacznik _ na spację (convention SentencePiece)
                             _text = _text.replace("▁", " ")
+                            # Wyślij tekst do klienta (typ wiadomości 0x02)
                             msg = b"\x02" + bytes(_text, encoding="utf8")
                             await ws.send_bytes(msg)
                         else:
+                            # Token specjalny - loguj dla debugowania
                             text_token_map = ['EPAD', 'BOS', 'EOS', 'PAD']
 
         async def send_loop():
+            """
+            Pętla wysyłania audio do klienta przez WebSocket.
+            
+            Ta funkcja:
+            - Odczytuje skompresowane audio (Opus) z opus_writer
+            - Wysyła je przez WebSocket do klienta
+            - Działa w nieskończonej pętli aż do zamknięcia połączenia
+            
+            Protokół: Typ wiadomości 0x01 = audio data
+            
+            Dla robota: Ta pętla wysyła wygenerowane odpowiedzi audio
+            do głośników robota/użytkownika.
+            """
             while True:
+                # Sprawdź czy połączenie zamknięte
                 if close:
                     return
+                
+                # Krótkie oczekiwanie
                 await asyncio.sleep(0.001)
+                
+                # Odczytaj skompresowane audio z opus_writer
                 msg = opus_writer.read_bytes()
+                
+                # Jeśli są dane - wyślij je
                 if len(msg) > 0:
+                    # Prefiks 0x01 = typ wiadomości "audio"
                     await ws.send_bytes(b"\x01" + msg)
 
+        # GŁÓWNA CZĘŚĆ handle_chat - orchestracja całej sesji
+        
         clog.log("info", "accepted connection")
+        
+        # Loguj konfigurację sesji
         if len(request.query["text_prompt"]) > 0:
             clog.log("info", f"text prompt: {request.query['text_prompt']}")
         if len(request.query["voice_prompt"]) > 0:
             clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
+        
+        # Flaga kontrolująca zakończenie pętli
         close = False
+        
+        # SEKCJA KRYTYCZNA: Tylko jedna sesja na raz (dzięki lock)
         async with self.lock:
+            # Ustaw seed jeśli podany (dla reprodukowalności)
             if seed is not None and seed != -1:
                 seed_all(seed)
 
+            # Utwórz enkoder/dekoder Opus dla tej sesji
             opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
             opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
+            
+            # Zresetuj stan streaming wszystkich modeli (czyści bufory)
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
             self.lm_gen.reset_streaming()
+            
             async def is_alive():
+                """
+                Sprawdza czy klient jest wciąż połączony.
+                
+                Używane podczas ładowania promptów systemowych - jeśli klient
+                się rozłączy w trakcie, przerywamy przetwarzanie.
+                """
                 if close or ws.closed:
                     return False
                 try:
-                    # Check for disconnect without waiting too long
+                    # Sprawdź czy przyszła wiadomość o rozłączeniu (timeout 10ms)
                     msg = await asyncio.wait_for(ws.receive(), timeout=0.01)
                     if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         return False
                 except asyncio.TimeoutError:
-                    # No messages → client probably still alive
+                    # Brak wiadomości = klient prawdopodobnie wciąż żyje
                     return True
                 except aiohttp.ClientConnectionError:
                     return False
                 return True
-            # Reuse mimi for encoding voice prompt and then reset it before conversation starts
+            
+            # KROK A: Przetwórz prompty systemowe (text + voice)
+            # Używamy mimi do enkodowania voice prompt, potem resetujemy
             await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
             self.mimi.reset_streaming()
             clog.log("info", "done with system prompts")
-            # Send the handshake.
+            
+            # KROK B: Wyślij handshake (potwierdzenie gotowości)
             if await is_alive():
+                # Wiadomość 0x00 = handshake
                 await ws.send_bytes(b"\x00")
                 clog.log("info", "sent handshake bytes")
-                # Clean cancellation manager
+                
+                # KROK C: Uruchom wszystkie trzy pętle równolegle
                 tasks = [
-                    asyncio.create_task(recv_loop()),
-                    asyncio.create_task(opus_loop()),
-                    asyncio.create_task(send_loop()),
+                    asyncio.create_task(recv_loop()),   # Odbieranie audio od użytkownika
+                    asyncio.create_task(opus_loop()),   # Przetwarzanie i generowanie
+                    asyncio.create_task(send_loop()),   # Wysyłanie audio do użytkownika
                 ]
 
+                # Czekaj aż którakolwiek pętla się zakończy
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                # Force-kill remaining tasks
+                
+                # Wymuś zakończenie pozostałych zadań
                 for task in pending:
                     task.cancel()
                     try:
@@ -518,22 +636,34 @@ class ServerState:
 
 def _get_voice_prompt_dir(voice_prompt_dir: Optional[str], hf_repo: str) -> Optional[str]:
     """
-    If voice_prompt_dir is None:
-      - download voices.tgz from HF
-      - extract it once
-      - return extracted directory
-    If voice_prompt_dir is provided:
-      - just return it
+    Pobiera katalog z plikami głosów (voice prompts).
+    
+    Jeśli voice_prompt_dir nie jest podany:
+      - Pobiera voices.tgz z Huggingface
+      - Rozpakowuje go raz (cache'uje)
+      - Zwraca ścieżkę do rozpakowanego katalogu
+    
+    Jeśli voice_prompt_dir jest podany:
+      - Po prostu zwraca go (użytkownik podał własny katalog)
+    
+    Args:
+        voice_prompt_dir: Opcjonalna ścieżka do katalogu z głosami
+        hf_repo: Nazwa repozytorium Huggingface
+    
+    Returns:
+        Ścieżka do katalogu z plikami głosów
     """
     if voice_prompt_dir is not None:
         return voice_prompt_dir
 
     logger.info("retrieving voice prompts")
 
+    # Pobierz voices.tgz z Huggingface (cache'owane lokalnie)
     voices_tgz = hf_hub_download(hf_repo, "voices.tgz")
     voices_tgz = Path(voices_tgz)
     voices_dir = voices_tgz.parent / "voices"
 
+    # Rozpakuj jeśli jeszcze nie rozpakowane
     if not voices_dir.exists():
         logger.info(f"extracting {voices_tgz} to {voices_dir}")
         with tarfile.open(voices_tgz, "r:gz") as tar:
@@ -546,40 +676,90 @@ def _get_voice_prompt_dir(voice_prompt_dir: Optional[str], hf_repo: str) -> Opti
 
 
 def _get_static_path(static: Optional[str]) -> Optional[str]:
+    """
+    Pobiera ścieżkę do plików statycznych interfejsu webowego.
+    
+    Jeśli static jest None:
+      - Pobiera dist.tgz z Huggingface (zbudowany frontend)
+      - Rozpakowuje go
+      - Zwraca ścieżkę
+    
+    Jeśli static jest podany:
+      - Zwraca go (chyba że "none" - wtedy nie serwuje UI)
+    
+    Args:
+        static: Opcjonalna ścieżka do katalogu z plikami statycznymi
+    
+    Returns:
+        Ścieżka do katalogu static lub None
+    """
     if static is None:
         logger.info("retrieving the static content")
+        # Pobierz zbudowany frontend z HF
         dist_tgz = hf_hub_download("nvidia/personaplex-7b-v1", "dist.tgz")
         dist_tgz = Path(dist_tgz)
         dist = dist_tgz.parent / "dist"
+        
+        # Rozpakuj jeśli potrzeba
         if not dist.exists():
             with tarfile.open(dist_tgz, "r:gz") as tar:
                 tar.extractall(path=dist_tgz.parent)
         return str(dist)
     elif static != "none":
-        # When set to the "none" string, we don't serve any static content.
+        # Gdy ustawione na "none" - nie serwujemy UI
         return static
     return None
 
 
 def main():
+    """
+    Główna funkcja uruchamiająca serwer PersonaPlex.
+    
+    Ta funkcja:
+    1. Parsuje argumenty wiersza poleceń
+    2. Pobiera/ładuje modele (Mimi, Moshi, tokenizer)
+    3. Przygotowuje głosy i pliki statyczne
+    4. Tworzy ServerState
+    5. Wykonuje warmup modeli
+    6. Uruchamia serwer HTTP/WebSocket
+    
+    Dla robota: To jest entry point - uruchom tę funkcję aby
+    wystartować serwer do komunikacji z robotem.
+    """
+    # KROK 1: Parsowanie argumentów
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="localhost", type=str)
-    parser.add_argument("--port", default=8998, type=int)
-    parser.add_argument("--static", type=str)
-    parser.add_argument("--gradio-tunnel", action='store_true', help='Activate a gradio tunnel.')
+    
+    # Argumenty sieciowe
+    parser.add_argument("--host", default="localhost", type=str,
+                       help="Adres hosta (localhost, 0.0.0.0 dla dostępu z sieci)")
+    parser.add_argument("--port", default=8998, type=int,
+                       help="Port serwera (domyślnie 8998)")
+    parser.add_argument("--static", type=str,
+                       help="Ścieżka do katalogu z plikami statycznymi UI")
+    
+    # Tunelowanie (dla zdalnego dostępu)
+    parser.add_argument("--gradio-tunnel", action='store_true',
+                       help='Aktywuj tunel Gradio (dostęp przez internet)')
     parser.add_argument("--gradio-tunnel-token",
-                        help='Provide a custom (secret) token here to keep getting the same URL.')
+                       help='Token tunelu (opcjonalnie, dla stałego URL)')
 
-    parser.add_argument("--tokenizer", type=str, help="Path to a local tokenizer file.")
-    parser.add_argument("--moshi-weight", type=str, help="Path to a local checkpoint file for Moshi.")
-    parser.add_argument("--mimi-weight", type=str, help="Path to a local checkpoint file for Mimi.")
+    # Ścieżki do modeli (opcjonalne - domyślnie pobiera z HF)
+    parser.add_argument("--tokenizer", type=str,
+                       help="Ścieżka do lokalnego pliku tokenizera")
+    parser.add_argument("--moshi-weight", type=str,
+                       help="Ścieżka do lokalnego checkpointu Moshi")
+    parser.add_argument("--mimi-weight", type=str,
+                       help="Ścieżka do lokalnego checkpointu Mimi")
     parser.add_argument("--hf-repo", type=str, default=loaders.DEFAULT_REPO,
-                        help="HF repo to look into, defaults PersonaPlex. "
-                             "Use this to select a different pre-trained model.")
-    parser.add_argument("--device", type=str, default="cuda", help="Device on which to run, defaults to 'cuda'.")
+                       help="Repozytorium HF (domyślnie PersonaPlex). "
+                            "Użyj dla innego pre-trained modelu.")
+    
+    # Konfiguracja sprzętowa
+    parser.add_argument("--device", type=str, default="cuda",
+                       help="Urządzenie do obliczeń (cuda/cpu, domyślnie cuda)")
     parser.add_argument("--cpu-offload", action="store_true",
-                        help="Offload LM model layers to CPU when GPU memory is insufficient. "
-                             "Requires 'accelerate' package.")
+                       help="Offload warstw LM na CPU gdy brak pamięci GPU. "
+                            "Wymaga pakietu 'accelerate'.")
     parser.add_argument(
         "--voice-prompt-dir",
         type=str,
