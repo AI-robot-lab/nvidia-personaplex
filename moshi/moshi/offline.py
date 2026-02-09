@@ -406,88 +406,135 @@ def run_inference(
     # Reset mimi streaming after voice prompt encoding
     mimi.reset_streaming()
 
-    # 8) Load and iterate user audio frames for feeding into the input channels
+    # ========== KROK 8: Załaduj i iteruj ramki audio użytkownika ==========
     sample_rate = mimi.sample_rate
-    user_audio = lm_load_audio(input_wav, sample_rate)  # (C, T) at model SR
+    user_audio = lm_load_audio(input_wav, sample_rate)  # Kształt: (C, T) przy sample rate modelu
 
-    # 9) Encode user audio with Mimi (same iterator logic used for voice prompts),
-    #    and step the model one frame at a time, collecting decoded PCM frames
-    generated_frames: List[np.ndarray] = []
-    generated_text_tokens: List[str] = []
-    total_target_samples = user_audio.shape[-1]
+    # ========== KROK 9: Enkoduj audio użytkownika i generuj odpowiedzi ==========
+    # Listy do zbierania wyników
+    generated_frames: List[np.ndarray] = []        # Ramki PCM audio odpowiedzi
+    generated_text_tokens: List[str] = []          # Tokeny tekstowe odpowiedzi
+    total_target_samples = user_audio.shape[-1]    # Docelowa długość outputu
 
+    # Iteruj przez enkodowane ramki audio użytkownika
+    # lm_iterate_audio - dzieli audio na małe fragmenty (ramki)
+    # lm_encode_from_sphn - enkoduje każdą ramkę przez Mimi
     for user_encoded in lm_encode_from_sphn(
         mimi,
         lm_iterate_audio(
-            user_audio, sample_interval_size=lm_gen._frame_size, pad=True
+            user_audio, 
+            sample_interval_size=lm_gen._frame_size,  # Rozmiar ramki
+            pad=True                                   # Dopełnij ostatnią ramkę
         ),
-        max_batch=1,
+        max_batch=1,  # Przetwarzaj pojedynczo (dla streaming-like behavior)
     ):
-        # user_encoded: [1, K, T]. Feed one step at a time (usually T==1)
+        # user_encoded ma kształt: [1, K, T]
+        # K = liczba codebooków, T = liczba ramek (zazwyczaj 1)
         steps = user_encoded.shape[-1]
+        
+        # Przetwarzaj każdą ramkę osobno
         for c in range(steps):
             step_in = user_encoded[:, :, c : c + 1]
-            # Feed user-side input channels; text + agent audio are sampled
+            
+            # KROK A: Wczytaj ramkę użytkownika, model generuje odpowiedź
+            # - step_in = kanały wejściowe (audio użytkownika)
+            # - Tekst + audio agenta są samplingowane przez model
             tokens = lm_gen.step(step_in)
+            
+            # Jeśli model jeszcze nie jest gotowy - pomiń
             if tokens is None:
                 continue
-            # Decode current sampled agent frame to PCM
+            
+            # KROK B: Dekoduj wygenerowane audio do PCM
             pcm = decode_tokens_to_pcm(mimi, other_mimi, lm_gen, tokens)
             generated_frames.append(pcm)
-            # Decode text token
-            text_token = tokens[0, 0, 0].item()
-            if text_token not in (0, 3):
+            
+            # KROK C: Dekoduj token tekstowy
+            text_token = tokens[0, 0, 0].item()  # Pierwszy kanał = tekst
+            
+            if text_token not in (0, 3):  # Jeśli nie jest tokenem specjalnym
+                # Konwersja ID tokena → tekst
                 _text = text_tokenizer.id_to_piece(text_token)  # type: ignore
-                _text = _text.replace("▁", " ")
+                _text = _text.replace("▁", " ")  # Zamień podkreślenia na spacje
                 log("info", f"text token '{_text}'")
                 generated_text_tokens.append(_text)
             else:
+                # Tokeny specjalne (padding, początek, koniec)
                 text_token_map = ['EPAD', 'BOS', 'EOS', 'PAD']
                 log("info", f"text token '{text_token_map[text_token]}'")
                 generated_text_tokens.append(text_token_map[text_token])
 
+    # Sprawdź czy wygenerowano jakieś ramki
     if len(generated_frames) == 0:
         log("error", "No audio frames were generated. Check input file and configuration.")
         return
 
-    # 10) Concatenate frames and trim/pad to match input duration
+    # ========== KROK 10: Połącz ramki i dopasuj długość ==========
+    # Połącz wszystkie ramki w jeden ciągły strumień
     output_pcm = np.concatenate(generated_frames, axis=-1)
+    
+    # Dopasuj długość outputu do długości inputu
     if output_pcm.shape[-1] > total_target_samples:
+        # Za długie - przytnij
         output_pcm = output_pcm[:total_target_samples]
     elif output_pcm.shape[-1] < total_target_samples:
+        # Za krótkie - dopełnij ciszą
         pad_len = total_target_samples - output_pcm.shape[-1]
         output_pcm = np.concatenate(
             [output_pcm, np.zeros(pad_len, dtype=output_pcm.dtype)], axis=-1
         )
 
-    # 11) Write mono WAV at model sample rate
+    # ========== KROK 11: Zapisz audio do pliku WAV ==========
+    # Zapisz jako mono WAV przy sample rate modelu
     sphn.write_wav(output_wav, output_pcm, sample_rate)
     log("info", f"Wrote output audio to {output_wav}")
 
-    # 12) Write text tokens
+    # ========== KROK 12: Zapisz transkrypcję tekstową ==========
+    # Zapisz tokeny tekstowe jako JSON (lista stringów)
     with open(output_text, "w") as file:
         json.dump(generated_text_tokens, file, ensure_ascii=False)
     log("info", f"Wrote output text to {output_text}")    
 
 
 def main():
-    """Parse CLI args and run offline inference."""
+    """
+    Parsuje argumenty wiersza poleceń i uruchamia offline inference.
+    
+    Ta funkcja jest entry pointem dla trybu offline - uruchamiana przez:
+    python -m moshi.offline [argumenty]
+    
+    Dla robota: Użyj tego trybu do testowania i generowania przykładów
+    bez potrzeby uruchamiania serwera WebSocket.
+    """
     parser = argparse.ArgumentParser(
-        description="Offline inference from WAV input using Moshi server components."
+        description="Offline inference z pliku WAV używając komponentów serwera Moshi."
+    )
+    
+    # === ARGUMENTY WYMAGANE ===
+    parser.add_argument(
+        "--input-wav", required=True, type=str, 
+        help="Ścieżka do pliku WAV wejściowego (audio użytkownika/pytanie)"
     )
     parser.add_argument(
-        "--input-wav", required=True, type=str, help="Path to input WAV file (user audio)"
+        "--output-wav", required=True, type=str, 
+        help="Ścieżka do pliku WAV wyjściowego (odpowiedź agenta)"
     )
     parser.add_argument(
-        "--output-wav", required=True, type=str, help="Path to output WAV file of agent audio to write"
+        "--output-text", required=True, type=str, 
+        help="Ścieżka do pliku JSON z transkrypcją tekstową odpowiedzi"
     )
+    
+    # === ARGUMENTY OPCJONALNE - KONFIGURACJA ===
     parser.add_argument(
-        "--output-text", required=True, type=str, help="Path to output JSON file of agent text to write"
+        "--text-prompt", 
+        default="You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.", 
+        type=str, 
+        help="Prompt tekstowy definiujący rolę i osobowość"
     )
-    parser.add_argument("--text-prompt", default="You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.", type=str, help="Text prompt")
 
     parser.add_argument(
-        "--voice-prompt", required=True, type=str, help="Voice prompt filename (basename) inside --voice-prompt-dir (e.g. 'NATM1.pt')."
+        "--voice-prompt", required=True, type=str, 
+        help="Nazwa pliku głosu (basename) w --voice-prompt-dir (np. 'NATM1.pt')"
     )
     parser.add_argument(
         "--voice-prompt-dir",
