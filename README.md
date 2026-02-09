@@ -1,5 +1,7 @@
 # PersonaPlex: Voice and Role Control for Full Duplex Conversational Speech Models
 
+> **📚 Dla studentów Politechniki Rzeszowskiej:** Pełna dokumentacja w języku polskim dostępna w pliku [**START_TUTAJ.pl.md**](docs/START_TUTAJ.pl.md) lub [**README.pl.md**](README.pl.md)
+
 [![Weights](https://img.shields.io/badge/🤗-Weights-yellow)](https://huggingface.co/nvidia/personaplex-7b-v1)
 [![Paper](https://img.shields.io/badge/📄-Paper-blue)](https://research.nvidia.com/labs/adlr/files/personaplex/personaplex_preprint.pdf)
 [![Demo](https://img.shields.io/badge/🎮-Demo-green)](https://research.nvidia.com/labs/adlr/personaplex/)
