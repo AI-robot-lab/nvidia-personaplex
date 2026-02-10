@@ -6,19 +6,47 @@ To repozytorium zostało specjalnie przygotowane dla Was, aby ułatwić naukę i
 
 ## 📚 Dostępne Materiały w Języku Polskim
 
-### 1. README.pl.md - Podstawy
+### 🚀 Dla Początkujących
+
+### 1. QUICK_START.pl.md - Szybki Start (NOWY!)
+**Lokalizacja:** `/docs/QUICK_START.pl.md`
+
+**Co znajdziesz:**
+- **Kompletny przewodnik instalacji** (45 minut)
+- Wymagania sprzętowe i programowe
+- Instalacja krok po kroku z wyjaśnieniami
+- Pierwsze testy (offline i real-time)
+- Ćwiczenia praktyczne dla początkujących
+- Rozwiązywanie typowych problemów
+
+**Kiedy czytać:** Zacznij tutaj jeśli instalujesz po raz pierwszy!
+
+### 2. README.pl.md - Podstawy
 **Lokalizacja:** `/README.pl.md`
 
 **Co znajdziesz:**
 - Wprowadzenie do PersonaPlex
-- Instrukcje instalacji krok po kroku
 - Podstawowe użycie (serwer i tryb offline)
 - Dostępne głosy i prompty
 - Przykłady użycia
 
-**Kiedy czytać:** Zacznij tutaj! To Twój pierwszy krok.
+**Kiedy czytać:** Po instalacji, jako ogólne wprowadzenie.
 
-### 2. UNITREE_G1_GUIDE.pl.md - Integracja z Robotem
+### 📖 Dokumentacja Szczegółowa
+
+### 3. ARCHITECTURE.pl.md - Jak to Działa
+**Lokalizacja:** `/docs/ARCHITECTURE.pl.md`
+
+**Co znajdziesz:**
+- Szczegółowa architektura systemu
+- Wyjaśnienie wszystkich komponentów (Mimi, Moshi, LM, etc.)
+- Przepływ danych w systemie
+- Kluczowe koncepty (streaming, ramki, codebooki)
+- Pytania i odpowiedzi techniczne
+
+**Kiedy czytać:** Gdy chcesz dogłębnie zrozumieć jak działa system od środka.
+
+### 4. UNITREE_G1_GUIDE.pl.md - Integracja z Robotem
 **Lokalizacja:** `/docs/UNITREE_G1_GUIDE.pl.md`
 
 **Co znajdziesz:**
@@ -31,19 +59,33 @@ To repozytorium zostało specjalnie przygotowane dla Was, aby ułatwić naukę i
 
 **Kiedy czytać:** Gdy już zrozumiesz podstawy i chcesz zintegrować z robotem.
 
-### 3. ARCHITECTURE.pl.md - Jak to Działa
-**Lokalizacja:** `/docs/ARCHITECTURE.pl.md`
+### ❓ Pomoc i Ćwiczenia
+
+### 5. FAQ.pl.md - Często Zadawane Pytania (NOWY!)
+**Lokalizacja:** `/docs/FAQ.pl.md`
 
 **Co znajdziesz:**
-- Szczegółowa architektura systemu
-- Wyjaśnienie wszystkich komponentów (Mimi, Moshi, LM, etc.)
-- Przepływ danych w systemie
-- Kluczowe koncepty (streaming, ramki, codebooki)
-- Pytania i odpowiedzi (FAQ)
+- **90+ pytań i odpowiedzi** z wszystkich obszarów
+- Podstawy, instalacja, użytkowanie
+- Wydajność i optymalizacja
+- Integracja z robotem
+- Rozwiązywanie problemów z diagnozyką
+- Rozwój i customizacja
 
-**Kiedy czytać:** Gdy chcesz dogłębnie zrozumieć jak działa system od środka.
+**Kiedy czytać:** Gdy masz pytanie lub napotkasz problem.
 
-### 4. client/README.pl.md - Interfejs Webowy
+### 6. EXERCISES.pl.md - Ćwiczenia Praktyczne (NOWY!)
+**Lokalizacja:** `/docs/EXERCISES.pl.md`
+
+**Co znajdziesz:**
+- **12 ćwiczeń praktycznych** (łatwe → trudne)
+- **3 projekty końcowe** (robot przewodnik, asystent lab, kompan edukacyjny)
+- Kryteria oceny i milestone'y
+- Kod przykładowy i szablony
+
+**Kiedy czytać:** Gdy chcesz praktycznie ćwiczyć i pogłębiać umiejętności.
+
+### 7. client/README.pl.md - Interfejs Webowy
 **Lokalizacja:** `/client/README.pl.md`
 
 **Co znajdziesz:**
@@ -92,11 +134,12 @@ To repozytorium zostało specjalnie przygotowane dla Was, aby ułatwić naukę i
 
 ## 🚀 Szybki Start - Twoje Pierwsze Kroki
 
-### Krok 1: Przeczytaj podstawy (15 min)
+### Krok 1: Przeczytaj przewodnik instalacji (15 min)
 ```bash
 # Otwórz w edytorze lub przeglądarce
-cat README.pl.md
+cat docs/QUICK_START.pl.md
 ```
+Ten przewodnik zawiera wszystko czego potrzebujesz do instalacji!
 
 ### Krok 2: Zainstaluj system (30 min)
 ```bash
@@ -107,6 +150,7 @@ pip install moshi/.
 # Skonfiguruj Huggingface
 export HF_TOKEN=<twój_token>
 ```
+Jeśli masz problemy - sprawdź sekcję "Rozwiązywanie problemów" w QUICK_START.pl.md
 
 ### Krok 3: Przetestuj tryb offline (10 min)
 ```bash
@@ -128,44 +172,71 @@ python -m moshi.server --ssl "$SSL_DIR"
 # Otwórz przeglądarkę: https://localhost:8998
 ```
 
-### Krok 5: Przeczytaj przewodnik robota (30 min)
+### Krok 5: Wykonaj pierwsze ćwiczenia (30 min)
+```bash
+cat docs/EXERCISES.pl.md
+# Zacznij od ćwiczeń łatwych (🟢) - Ćwiczenia 1.1-1.3
+```
+
+### Krok 6: Przeczytaj przewodnik robota (30 min)
 ```bash
 cat docs/UNITREE_G1_GUIDE.pl.md
 ```
 
-### Krok 6: Zrozum architekturę (45 min)
+### Krok 7: Zrozum architekturę (45 min)
 ```bash
 cat docs/ARCHITECTURE.pl.md
 ```
 
-### Krok 7: Eksperymentuj! (∞)
+### Krok 8: Eksperymentuj! (∞)
 - Zmień prompty tekstowe
 - Wypróbuj różne głosy
 - Zmodyfikuj kod
 - Zintegruj z robotem
+- Wykonuj kolejne ćwiczenia
 
 ## 🎯 Ścieżki Nauki
 
-### Ścieżka A: "Chcę szybko zacząć"
-1. README.pl.md - sekcja "Instalacja"
+### Ścieżka A: "Chcę szybko zacząć" (Minimum)
+1. **QUICK_START.pl.md** - kompletna instalacja (45 min)
 2. Uruchom tryb offline z przykładem
-3. UNITREE_G1_GUIDE.pl.md - przykłady kodu
-4. Zacznij integrację z robotem
+3. **EXERCISES.pl.md** - Ćwiczenia 1.1-1.3 (łatwe)
+4. **UNITREE_G1_GUIDE.pl.md** - przykłady kodu
+5. Zacznij integrację z robotem
 
-### Ścieżka B: "Chcę dogłębnie zrozumieć"
-1. README.pl.md - całość
-2. ARCHITECTURE.pl.md - całość
-3. Przeczytaj komentarze w server.py
-4. Przeczytaj komentarze w offline.py
-5. Eksperymentuj z kodem
-6. UNITREE_G1_GUIDE.pl.md
-7. Zaawansowana integracja
+**Czas:** ~3 godziny
 
-### Ścieżka C: "Mam konkretny problem"
-1. Sprawdź FAQ w ARCHITECTURE.pl.md
-2. Sprawdź "Rozwiązywanie problemów" w UNITREE_G1_GUIDE.pl.md
-3. Przeczytaj komentarze w relevantnej funkcji
-4. Zobacz Issues na GitHubie
+### Ścieżka B: "Chcę dogłębnie zrozumieć" (Zalecana)
+1. **QUICK_START.pl.md** - instalacja i pierwsze testy
+2. **README.pl.md** - ogólna dokumentacja
+3. **ARCHITECTURE.pl.md** - zrozumienie systemu od środka
+4. Przeczytaj komentarze w **server.py** i **offline.py**
+5. **EXERCISES.pl.md** - wszystkie ćwiczenia łatwe i średnie
+6. **UNITREE_G1_GUIDE.pl.md** - integracja z robotem
+7. **EXERCISES.pl.md** - ćwiczenia trudne
+8. Zaawansowana integracja i projekty końcowe
+
+**Czas:** 2-3 tygodnie
+
+### Ścieżka C: "Mam konkretny problem" (Troubleshooting)
+1. **FAQ.pl.md** - sprawdź czy Twój problem jest opisany (90+ pytań!)
+2. **QUICK_START.pl.md** - sekcja "Rozwiązywanie problemów"
+3. **UNITREE_G1_GUIDE.pl.md** - sekcja "Rozwiązywanie problemów"
+4. Przeczytaj komentarze w relevantnej funkcji (server.py/offline.py)
+5. Zobacz Issues na GitHubie
+6. Zapytaj na Discord
+
+### Ścieżka D: "Chcę zrobić projekt" (Dla ambitnych)
+1. Przejdź Ścieżkę B (zrozumienie systemu)
+2. **EXERCISES.pl.md** - wybierz projekt końcowy:
+   - Projekt 1: Robot przewodnik muzealny
+   - Projekt 2: Asystent laboratoryjny  
+   - Projekt 3: Kompan edukacyjny dla dzieci
+3. Realizuj projekt według milestone'ów
+4. Dokumentuj postępy
+5. Prezentuj wyniki
+
+**Czas:** 4-5 tygodni
 
 ## 🛠️ Typowe Zadania
 
